@@ -1,0 +1,678 @@
+
+%%inputting an excel file that contains all our data of interest
+%%currently this is set for creating a mask based on all the patients, but
+%%it could just as easily be used for a single patient
+xls_path_2='C:\Users\Admin\Documents\GUTIEEG\Mask_maker_excel_files\variable_sys_length_Beta.xlsx';
+mask_path= 'C:\Users\Admin\Documents\GUTIEEG\Overall_patient_masks';
+[~,~,elec_data]=xlsread(xls_path_2);
+
+
+%%no idea why but sometimes elec_data contains a random block at the end
+%%full of nans
+weird_nan=[];
+for jj= 1:length(elec_data)
+    
+    if sum(isnan(elec_data{jj,1})) >0
+        weird_nan=[weird_nan,jj];
+    end
+end
+elec_data(weird_nan,:)=[];
+
+
+%%% adding a column with zscores of the effect sizes
+effect= [elec_data{2:end,5}];
+effect_z=zscore(effect);
+
+for tt=1:length(effect_z)
+    elec_data{tt+1,12}=effect_z(tt);
+end
+
+elec_data{1,12}= 'z score of effect size';
+
+
+
+
+
+
+
+
+%% downloading the basic MRI template where we'll project all of our electrodes
+%Here I'm just using a recent spm atlas, but you could easily use colin27
+%or something like that if you prefer
+
+brain_path='C:\Users\Admin\Downloads\template\atlas\spm_anatomy\AllAreas_v18.img';
+
+
+
+%%BE WARNED for whatever the reason fieldtrip's ft_volumewrite function
+%%which is a critical component of this code glitches out when you try to
+%%save a file with a decimal number ie .5, as such you need to manually
+%%change the names in the below code starting at line 153. 
+
+mri=ft_read_mri(brain_path);
+null_mri=mri;
+sys_mri=mri;
+dys_mri=mri; %instead of creating our own template we'll just overwrite an existing one :)
+sys_dys_mri=mri;
+brain_size=size(mri.anatomy);
+null_mask=zeros(brain_size); sys_mask=zeros(brain_size); dys_mask=zeros(brain_size); sys_dys_mask=zeros(brain_size); %initializing our mask 3d matrices
+
+right_flip='true'; % as an added control we flip everything to the right to get a better sense for our effect localizations
+
+
+simple_effect_size='true';%% outputs a mask based on an effect size cuttoff designated below
+effect_size_cutoff=.05; %% the cutoff for effect size after which point we'll begin to add points to the systolic or diastolic masks
+
+
+z_score='false';
+z_score_cutoff=2.5; %the cutoff for the zscore of the effect sizes which we got in the last step
+
+flatten='false'; %outputs flat MRis and masks 
+patient_specific='false'; % outputs three masks for each participant
+general_roi='false'; % gives a mask with only contacts in a pre- designated 3d space
+specific_square='false'; % outputs a mask with only the pre designated cube (not the contacts on an image of the whole cerebrum)
+FDR_corrected_vals='false'; %outputs a mask with only electrodes that were found to be significant after permutation testing and FDR correction see sysdysieeg_FDR_calculation
+
+
+
+
+
+
+
+for ii=2:length(elec_data)
+    null_mask_code= 'false';
+    dys_mask_code='false';
+    sys_mask_code='false'; % these are our switches to decide what mask a given point will belong to
+    
+    
+cfg=[];
+cfg.inputcoord='mni';
+
+cfg.roi= [elec_data{ii,6:8}]; %iterating through each of our electrodes
+
+if strcmp(right_flip, 'true')
+    cfg.roi(1)=abs(cfg.roi(1)); %flippin to the right
+end
+%cfg.atlas=brain_path; %since we're just projecting from an atlas we use it to look things up as well, but cfg.template and mri don't have to be the same
+%% our mask maker for effect sizes
+if strcmp(simple_effect_size, 'true')
+if abs(elec_data{ii,5}) < effect_size_cutoff %if the effect size is below .05 in either direction
+cfg.sphere=1 %minimum possible size
+null_mask_code='true'; %% this 1 mm^3 sphere will be part of our null mask
+elseif  elec_data{ii,5} > effect_size_cutoff % if there is a positive value above our cutoff
+    sys_mask_code='true';
+  effect_size_sys=  elec_data{ii,5};
+    cfg.sphere= 1+(((effect_size_sys-effect_size_cutoff)*100)*.25) %% for every .01 above .05 a given electrode will be given another .25 mm
+elseif elec_data{ii,5} < (-1* effect_size_cutoff)                          %% or for every .01 above .1 we give .5
+    dys_mask_code='true';
+      effect_size_dys=  elec_data{ii,5};
+        cfg.sphere= 1+(((abs(effect_size_dys)-effect_size_cutoff)*100)*.25) %% for every .01 below -.05 a given electrode will be given another .25 mm
+end
+%% our mask maker for z scores of effect sizes
+elseif strcmp(z_score, 'true')
+    
+if abs(elec_data{ii,12}) < z_score_cutoff %if the z score is below 2.5 in either direction
+cfg.sphere=1
+null_mask_code='true'; %% this 1 mm^3 sphere will be part of our null mask
+elseif  elec_data{ii,12} > z_score_cutoff
+    sys_mask_code='true'
+    cfg.sphere= 3; 
+elseif elec_data{ii,12} < (-1* z_score_cutoff)                         
+    dys_mask_code='true';
+        cfg.sphere= 3; %% for every .01 below -.05 a given electrode will be given another .25 mm
+end
+
+
+%% our mask maker for FDR_corrected_vals post permutation test.
+elseif  strcmp(FDR_corrected_vals, 'true')
+    
+if elec_data{ii,13} == 0 %if there wasn't a significant contact
+cfg.sphere=1;
+null_mask_code='true'; %% this 1 mm^3 sphere will be part of our null mask
+elseif  elec_data{ii,13} > 0 && elec_data{ii,5} >0
+    disp('significant systolic contact')
+    sys_mask_code='true'
+    cfg.sphere= 2; 
+elseif  elec_data{ii,13} > 0 && elec_data{ii,5} <0      
+    disp('significant diastolic contact')
+    dys_mask_code='true';
+        cfg.sphere= 2; 
+end
+
+
+
+end  
+mask=ft_volumelookup(cfg,mri); %Here the coordinates are looked up and a sphere is drawn based on the effect size
+
+if strcmp(null_mask_code, 'true')
+    disp('null electrode')
+    null_mask=null_mask+mask;
+elseif strcmp(sys_mask_code, 'true')
+    disp('sys electrode')
+    sys_mask=sys_mask+mask;
+elseif strcmp(dys_mask_code, 'true')
+    disp('dys_electrode')
+    dys_mask=dys_mask+mask;
+end
+end
+
+
+null_mri.anatomy= null_mask;
+
+sys_mri.anatomy=sys_mask;
+
+dys_mri.anatomy= dys_mask;
+
+
+
+sys_saver=sys_mri;
+
+dys_saver=dys_mri;
+
+
+
+
+
+cfg=[];
+cfg.filetype= 'nifti';
+cfg.parameter='anatomy';
+if strcmp(right_flip, 'true') && strcmp(z_score, 'true')
+    cfg.filename= 'right_flipped_High_gamma_null_mask_point_two_point_five_zscore_cutoff';
+    
+    elseif strcmp(right_flip, 'true') && strcmp(FDR_corrected_vals, 'true')
+    cfg.filename= 'right_flipped_High_gamma_variable_sys_null_mask_FDR_corrected';
+
+    
+elseif ~strcmp(right_flip, 'true') && strcmp(z_score, 'true')
+    cfg.filename= 'High_gamma_null_mask_point_two_point_five_zscore_cutoff' %unfortunately fieldtrip does not output names with a decimal number in them ie .5 and so you have to manually change these names whenever you shift the effect size cutoff
+
+
+elseif strcmp(right_flip, 'true') && strcmp(simple_effect_size, 'true')
+    cfg.filename= 'right_flipped_Beta_null_mask_variable_systolic_length_point_zero_five_effect_size_cutoff';
+% else
+% cfg.filename='High_gamma_null_mask_point_zero_five_cutoff'
+end
+
+
+ft_volumewrite(cfg, null_mri)
+save(fullfile(mask_path,cfg.filename), 'null_mask')
+
+
+if strcmp(right_flip, 'true') && strcmp(z_score, 'true')
+    cfg.filename= 'right_flipped_High_gamma_systolic_mask_point_two_point_five_zscore_cutoff';
+    
+       elseif strcmp(right_flip, 'true') && strcmp(FDR_corrected_vals, 'true')
+    cfg.filename= 'right_flipped_High_gamma_variable_sys_systolic_mask_FDR_corrected';
+    
+elseif ~strcmp(right_flip, 'true') && strcmp(z_score, 'true')
+    cfg.filename= 'High_gamma_systolic_mask_point_two_point_five_zscore_cutoff'
+    
+elseif strcmp(right_flip, 'true'), strcmp(simple_effect_size, 'true')
+    cfg.filename= 'right_flipped_Beta_systolic_mask_variable_systolic_length_point_zero_five_effect_size_cutoff';
+% cfg.filename='High_gamma_systolic_mask_point_zero_five_cutoff'
+end
+
+
+ft_volumewrite(cfg, sys_mri)
+save(fullfile(mask_path,cfg.filename), 'sys_mask')
+
+
+if strcmp(right_flip, 'true') && strcmp(z_score, 'true')
+    cfg.filename= 'right_flipped_High_gamma_diastolic_mask_point_two_point_five_zscore_cutoff';
+    
+       elseif strcmp(right_flip, 'true') && strcmp(FDR_corrected_vals, 'true')
+    cfg.filename= 'right_flipped_High_gamma_variable_sys_diastolic_mask_FDR_corrected';
+elseif ~strcmp(right_flip, 'true') && strcmp(z_score, 'true')
+    cfg.filename= 'High_gamma_diastolic_mask_point_two_point_five_zscore_cutoff'
+elseif strcmp(right_flip, 'true'), strcmp(simple_effect_size, 'true')
+    cfg.filename= 'right_flipped_Beta_diastolic_mask_variable_systolic_length_point_zero_five_effect_size_cutoff';
+ % else
+% cfg.filename='High_gamma_diastolic_mask_point_zero_five_cutoff'
+end
+
+
+ft_volumewrite(cfg, dys_mri)
+save(fullfile(mask_path,cfg.filename), 'dys_mask')
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+%%%% section to evaluate a specific section, either by pulling out a close
+%%%% up cube or only looking at a specific set of contacts in said cube
+
+
+
+
+if strcmp(general_roi, 'true')
+    
+     xdim=[18:65];
+ ydim=[-48:8];
+ zdim= [-38:-15]; %specify the dimmensions of the cube you'd like to extract, 
+ %probably if you want to be careful you can upload specific parameters for
+ %a given region, here I'm being a little fast and loose.
+  target_region= 'medial_right_temporal_cortex'; %% enter the region you're attempting to evaluate specifically.   
+
+ 
+ transform_coor= mri.transform(1:3,4)  
+    if strcmp(specific_square, 'true')
+    
+  
+  
+  
+  
+ 
+   sys_mask_hold= zeros(length(xdim),length(ydim),length(zdim));
+    dys_mask_hold= zeros(length(xdim),length(ydim),length(zdim));
+    null_mask_hold= zeros(length(xdim),length(ydim),length(zdim));
+    basic_mask_hold= zeros(length(xdim),length(ydim),length(zdim));
+    
+    
+    
+    else
+       
+           sys_mask_hold= zeros(size(mri.anatomy,1),size(mri.anatomy,2),size(mri.anatomy,3));
+    dys_mask_hold= zeros(size(mri.anatomy,1),size(mri.anatomy,2),size(mri.anatomy,3));
+    null_mask_hold= zeros(size(mri.anatomy,1),size(mri.anatomy,2),size(mri.anatomy,3));
+    basic_mask_hold= zeros(size(mri.anatomy,1),size(mri.anatomy,2),size(mri.anatomy,3));
+        
+    end
+        
+        
+        
+
+
+ for ii= 1: length(zdim)
+     if strcmp(specific_square, 'true')
+    sys_mask_hold(:,:, ii)=sys_mask(xdim+abs(transform_coor(1)),ydim+abs(transform_coor(2)),zdim(ii)+abs(transform_coor(3)));
+ dys_mask_hold(:,:, ii)=dys_mask(xdim+abs(transform_coor(1)),ydim+abs(transform_coor(2)),zdim(ii)+abs(transform_coor(3)));
+ null_mask_hold(:,:, ii)=null_mask(xdim+abs(transform_coor(1)),ydim+abs(transform_coor(2)),zdim(ii)+abs(transform_coor(3)));
+ basic_mask_hold(:,:, ii)=mri.anatomy(xdim+abs(transform_coor(1)),ydim+abs(transform_coor(2)),zdim(ii)+abs(transform_coor(3)));
+     
+ 
+     
+     else
+         
+     
+  sys_mask_hold(xdim+abs(transform_coor(1)),ydim+abs(transform_coor(2)),zdim(ii)+abs(transform_coor(3)))=sys_mask(xdim+abs(transform_coor(1)),ydim+abs(transform_coor(2)),zdim(ii)+abs(transform_coor(3)));
+ dys_mask_hold(xdim+abs(transform_coor(1)),ydim+abs(transform_coor(2)),zdim(ii)+abs(transform_coor(3)))=dys_mask(xdim+abs(transform_coor(1)),ydim+abs(transform_coor(2)),zdim(ii)+abs(transform_coor(3)));
+ null_mask_hold(xdim+abs(transform_coor(1)),ydim+abs(transform_coor(2)),zdim(ii)+abs(transform_coor(3)))=null_mask(xdim+abs(transform_coor(1)),ydim+abs(transform_coor(2)),zdim(ii)+abs(transform_coor(3)));
+ 
+     end
+
+ end
+
+ 
+null_square_mri=mri;
+
+null_square_mri.anatomy=null_mask_hold;
+
+
+
+sys_square_mri=mri;
+
+sys_square_mri.anatomy=sys_mask_hold;
+
+
+dys_square_mri=mri;
+
+dys_square_mri.anatomy=dys_mask_hold;
+
+
+ basic_square_mri=mri;
+ 
+ basic_square_mri.anatomy=basic_mask_hold;
+ 
+ if strcmp(specific_square, 'true')
+ 
+ null_square_mri.dim= [length(xdim),length(ydim),length(zdim)];
+ sys_square_mri.dim= [length(xdim),length(ydim),length(zdim)];
+ 
+ dys_square_mri.dim= [length(xdim),length(ydim),length(zdim)];
+ 
+basic_square_mri.dim= [length(xdim),length(ydim),length(zdim)];
+
+ 
+ end
+     
+     
+   
+cfg=[];
+cfg.filetype= 'nifti';
+cfg.parameter='anatomy';  
+
+
+ if strcmp(right_flip, 'true')
+    cfg.filename= strcat(['right_flipped_', target_region, '_High_gamma_null_mask_point_zero_five_cutoff'])
+else
+cfg.filename=strcat([target_region, '_High_gamma_null_mask_point_zero_five_cutoff'])
+end
+
+
+ft_volumewrite(cfg, null_square_mri)
+save(fullfile(mask_path,cfg.filename), 'null_mask_hold')
+
+
+
+
+ if strcmp(right_flip, 'true')
+    cfg.filename= strcat(['right_flipped_', target_region, '_High_gamma_systolic_mask_point_zero_five_cutoff'])
+else
+cfg.filename=strcat([target_region, '_High_gamma_systolic_mask_point_zero_five_cutoff'])
+ end
+
+
+
+ft_volumewrite(cfg, sys_square_mri)
+save(fullfile(mask_path,cfg.filename), 'sys_mask_hold')
+
+
+ if strcmp(right_flip, 'true')
+    cfg.filename= strcat(['right_flipped_', target_region, '_High_gamma_diastolic_mask_point_zero_five_cutoff'])
+else
+cfg.filename=strcat([target_region, '_High_gamma_diastolic_mask_point_zero_five_cutoff'])
+end
+
+
+ft_volumewrite(cfg, dys_square_mri)
+save(fullfile(mask_path,cfg.filename), 'dys_mask_hold')
+
+ 
+ cfg.filename= 'right medial temporal block'
+  
+ ft_volumewrite(cfg, basic_square_mri)
+end
+
+
+
+
+
+
+
+
+%%section to make participant specific masks
+
+if strcmp(patient_specific, 'true')
+
+
+
+
+mri=ft_read_mri(brain_path);
+brain_size=size(mri.anatomy);
+null_mask=zeros(brain_size); sys_mask=zeros(brain_size); dys_mask=zeros(brain_size); sys_dys_mask=zeros(brain_size); %initializing our mask 3d matrices
+
+patient_cell= cell(18,4); %
+%in this section we will simply split each of our participants up in order to assess if we're analyzing anything out of the brain
+
+patient_cell{1}='patient num';
+
+
+patient_cell{1,2}='systolic mask';
+
+patient_cell{1,3}='diastolic mask';
+
+patient_cell{1,4}='null mask';
+
+
+
+
+pt_count=2; %in this for loop we iterate over our master spread sheet and update a patient cell with each mask
+
+
+for ii=2:length(elec_data)
+    null_mask_code= 'false';
+    dys_mask_code='false';
+    sys_mask_code='false'; % these are our switches to decide what mask a given point will belong to
+    
+  
+    
+cfg=[];
+cfg.inputcoord='mni';
+
+cfg.roi= [elec_data{ii,6:8}]; %iterating through each of our electrodes
+
+
+cfg.atlas=brain_path; %since we're just projecting from an atlas we use it to look things up as well, but cfg.template and mri don't have to be the same
+if abs(elec_data{ii,5}) < effect_size_cutoff %if the effect size is below .05 in either direction
+cfg.sphere=1;
+null_mask_code='true'; %% this 1 mm^3 sphere will be part of our null mask
+elseif  elec_data{ii,5} > effect_size_cutoff
+    sys_mask_code='true';
+  effect_size_sys=  elec_data{ii,5};
+    cfg.sphere= 1+(((effect_size_sys-effect_size_cutoff)*100)*.25); %% for every .01 above .05 a given electrode will be given another .25 mm
+elseif elec_data{ii,5} < (-1* effect_size_cutoff)                          %% or for every .01 above .1 we give .5
+    dys_mask_code='true';
+      effect_size_dys=  elec_data{ii,5};
+        cfg.sphere= 1+(((abs(effect_size_dys)-effect_size_cutoff)*100)*.25); %% for every .01 below -.05 a given electrode will be given another .25 mm
+end
+    
+mask=ft_volumelookup(cfg,mri);
+
+
+if strcmp(null_mask_code, 'true')
+    disp('null electrode')
+    null_mask=null_mask+mask;
+elseif strcmp(sys_mask_code, 'true')
+    disp('sys electrode')
+    sys_mask=sys_mask+mask;
+elseif strcmp(dys_mask_code, 'true')
+    disp('dys_electrode')
+    dys_mask=dys_mask+mask;
+end
+
+if ii== length(elec_data)
+    disp('ya remembering to take breaks every now and again?')
+    
+    
+        patient_cell{pt_count,1}= elec_data{ii,1};
+        patient_cell{pt_count,2}= sys_mask;
+        patient_cell{pt_count,3}=dys_mask;
+        patient_cell{pt_count,4}=null_mask;
+        
+    
+elseif elec_data{ii,1} ~= elec_data{ii+1,1} %in a situation where an electrode is the last one in a given section
+        disp(strcat(['transition from ' num2str(elec_data{ii,1}), ' to ', num2str(elec_data{ii+1,1})]))
+        
+                disp(strcat(['transition from ' num2str(elec_data{ii,1}), ' to ', num2str(elec_data{ii+1,1})]))
+
+                        disp(strcat(['transition from ' num2str(elec_data{ii,1}), ' to ', num2str(elec_data{ii+1,1})]))
+
+        patient_cell{pt_count,1}= elec_data{ii,1};
+        patient_cell{pt_count,2}= sys_mask;
+        patient_cell{pt_count,3}=dys_mask;
+        patient_cell{pt_count,4}=null_mask;
+        
+        pt_count=pt_count+1;
+        
+        null_mask=zeros(brain_size); sys_mask=zeros(brain_size); dys_mask=zeros(brain_size); sys_dys_mask=zeros(brain_size); %initializing our mask 3d matrices
+end
+        
+        
+        
+ end
+
+%% now to output three seperate masks for each participant
+
+for qq=2:length(patient_cell)
+    
+null_mri=mri;
+sys_mri=mri;
+dys_mri=mri;
+
+
+
+null_mri.anatomy= patient_cell{qq,4};
+
+sys_mri.anatomy=patient_cell{qq,2};
+dys_mri.anatomy= patient_cell{qq,3};
+
+
+
+sys_saver=sys_mri;
+
+dys_saver=dys_mri;
+
+
+
+cfg=[];
+cfg.filetype= 'nifti';
+cfg.parameter='anatomy';
+
+ 
+cfg.filename=strcat([num2str(patient_cell{qq,1}),' High_gamma_null_mask_point_zero_five_cutoff'])
+
+ft_volumewrite(cfg, null_mri)
+
+
+
+
+
+cfg.filename=strcat([num2str(patient_cell{qq,1}),' High_gamma_systolic_mask_point_zero_five_cutoff'])
+
+
+
+ft_volumewrite(cfg, sys_mri)
+
+
+cfg.filename=strcat([num2str(patient_cell{qq,1}),' High_gamma_diastolic_mask_point_zero_five_cutoff'])
+
+
+
+ft_volumewrite(cfg, dys_mri)
+end
+
+
+save(fullfile(mask_path, 'all patients electrode info'), 'patient_cell')
+
+
+
+
+
+
+end
+
+
+
+
+
+
+
+
+
+
+
+
+%%section to make a flattened mask across the x or z axis currently
+%%unfinished
+
+
+flatten='true'
+% if strcmp(flatten, 'true')
+% 
+%     
+%     
+%     
+% %% our masks will only be in the x and y dimmensions
+% 
+% flat_sys_hold_zdim= zeros(size(mri.anatomy,1), size(mri.anatomy,2));
+%     
+%     flat_dys_hold_zdim= zeros(size(mri.anatomy,1), size(mri.anatomy,2));
+% 
+%     flat_null_hold_zdim= zeros(size(mri.anatomy,1), size(mri.anatomy,2));
+%     
+%     
+%     for qq= 1:size(mri.anatomy,3)
+%         
+%         flat_sys_hold_zdim= sys_mask_hold(:,:,qq)+flat_sys_hold_zdim;
+%         
+%         flat_dys_hold_zdim= dys_mask_hold(:,:,qq)+flat_dys_hold_zdim;
+% 
+%         flat_null_hold_zdim= null_mask_hold(:,:,qq)+flat_null_hold_zdim;
+%         
+%     end
+% 
+% 
+%     
+%     
+%     
+%     
+% flat_null_square_mri=mri;
+% 
+% flat_null_square_mri.anatomy=flat_null_hold_zdim;
+% flat_null_square_mri.dim= [size(flat_null_hold_zdim),1];
+% 
+% 
+% flat_sys_square_mri=mri;
+% 
+% flat_sys_square_mri.anatomy=flat_sys_hold_zdim;
+% flat_sys_square_mri.dim= [size(flat_sys_hold_zdim),1];
+% 
+% flat_dys_square_mri=mri;
+% 
+% flat_dys_square_mri.anatomy=flat_dys_hold_zdim;
+% flat_dys_square_mri.dim= [size(flat_dys_hold_zdim),1];
+% 
+%     
+% 
+% 
+% 
+% 
+% 
+% 
+% 
+% 
+%  if strcmp(right_flip, 'true')
+%     cfg.filename= strcat(['right_flipped_flattened', target_region, '_High_gamma_null_mask_point_zero_five_cutoff'])
+% else
+% cfg.filename=strcat([target_region, 'flattened_High_gamma_null_mask_point_zero_five_cutoff'])
+% end
+% 
+% 
+% ft_volumewrite(cfg, flat_null_square_mri)
+% save(fullfile(mask_path,cfg.filename), 'flat_null_hold_zdim')
+% 
+% 
+% 
+% 
+%  if strcmp(right_flip, 'true')
+%     cfg.filename= strcat(['right_flipped_flattened', target_region, '_High_gamma_systolic_mask_point_zero_five_cutoff'])
+% else
+% cfg.filename=strcat([target_region, 'flattened_High_gamma_systolic_mask_point_zero_five_cutoff'])
+%  end
+% 
+% 
+% 
+% ft_volumewrite(cfg, flat_sys_square_mri)
+% save(fullfile(mask_path,cfg.filename), 'flat_sys_hold_zdim')
+% 
+% 
+%  if strcmp(right_flip, 'true')
+%     cfg.filename= strcat(['right_flipped_flattened', target_region, '_High_gamma_diastolic_mask_point_zero_five_cutoff'])
+% else
+% cfg.filename=strcat([target_region, 'flattened_High_gamma_diastolic_mask_point_zero_five_cutoff'])
+% end
+% 
+% 
+% ft_volumewrite(cfg, flat_dys_square_mri)
+% save(fullfile(mask_path,cfg.filename), 'flat_dys_hold_zdim')
+% 
+%  
+% 
+% end
+% 
+% 
+
+
+
+    
+
+
